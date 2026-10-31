@@ -6,7 +6,7 @@ import {
 export const TOKEN_KEY = "mi_fitness_token";
 export const LOGIN_SESSION_KEY = "mi_fitness_login_session";
 
-const XIAOMI_QR_LOGIN_URL = "https://account.xiaomi.com/longPolling/loginUrl";
+const XIAOMI_QR_LOGIN_URL = "https://c3.account.xiaomi.com/longPolling/loginUrl";
 const STS_HEALTH_URL = "https://sts-hlth.io.mi.com/healthapp/sts";
 const HEALTH_API_BASE = "https://hlth.io.mi.com";
 const SERVICE_SID = "miothealth";
