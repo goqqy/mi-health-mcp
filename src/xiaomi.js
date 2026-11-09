@@ -443,6 +443,16 @@ async function latestHealth(token, fetchImpl) {
     }
   }
 
+  // 小米的"最新快照"会落后好几天（11-10 实测停在 11-02，按天的日报已经到 11-09），
+  // 所以再查一下最近两天的日报，哪边日期新就用哪边。
+  for (const metric of Object.keys(outputNames)) {
+    const daily = await recentDaily(token, relativeUid, metric, fetchImpl);
+    const current = selected[outputNames[metric]];
+    if (daily && (!current?.date || daily.date > current.date)) {
+      selected[outputNames[metric]] = daily;
+    }
+  }
+
   const stale = Object.entries(selected)
     .filter(([, item]) => item.is_stale)
     .map(([name, item]) => `${name} 停在 ${item.date ?? "未知日期"}`);
@@ -458,6 +468,33 @@ async function latestHealth(token, fetchImpl) {
           ? `不是今天的数据：${stale.join("，")}（手环可能没戴、没电，或手机还没同步上来）`
           : undefined,
   };
+}
+
+async function recentDaily(token, relativeUid, metric, fetchImpl) {
+  let series;
+  try {
+    series = await healthSeries(token, metric, 2, fetchImpl, Date.now(), relativeUid);
+  } catch (error) {
+    if (error?.authExpired) throw error;
+    return null;
+  }
+  const last = series.data.at(-1);
+  if (!last) return null;
+  const base = { date: last.date, is_stale: isStale(last.time), source: "daily_report" };
+  if (metric === "heart_rate") {
+    const latest = last.latest_hr || {};
+    // latest_hr.time 比实际多了 8 小时，dbTime 才是真的
+    const time = Number(latest.dbTime || last.time || 0);
+    return {
+      time,
+      ...base,
+      bpm: latest.bpm ?? null,
+      avg_hr: last.avg_hr,
+      max_hr: last.max_hr,
+      min_hr: last.min_hr,
+    };
+  }
+  return { ...last, ...base };
 }
 
 function cstTodayWindow(now, days) {
@@ -500,8 +537,8 @@ export async function getHealthSeries(
   );
 }
 
-async function healthSeries(token, metric, days, fetchImpl, now) {
-  const relativeUid = await firstRelative(token, fetchImpl);
+async function healthSeries(token, metric, days, fetchImpl, now, knownUid) {
+  const relativeUid = knownUid ?? (await firstRelative(token, fetchImpl));
   const { start, end } = cstTodayWindow(now, days);
   const response = await encryptedRequest(
     fetchImpl,

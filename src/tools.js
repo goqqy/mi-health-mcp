@@ -30,7 +30,8 @@ const daysSchema = {
 export const TOOLS = [
   {
     name: "health_latest",
-    description: "查询第一位亲友最新的睡眠、心率和步数快照；仅返回已有数据。",
+    description:
+      "查询第一位亲友最近的睡眠、心率和步数：快照和最近两天的日报取较新的一份，每项带 date / is_stale，不是今天的会在 message 里写明停在哪天。",
     inputSchema: emptySchema,
   },
   {

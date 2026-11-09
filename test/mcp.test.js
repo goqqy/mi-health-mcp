@@ -225,7 +225,8 @@ test("health_latest resolves the first relative and returns only available metri
   assert.equal(value.data.heart_rate.bpm, 72);
   assert.equal("steps" in value.data, false);
   assert.equal("weight" in value.data, false);
-  assert.equal(fetchImpl.calls.length, 2);
+  // 列表 + 快照 + 三个指标各查一次日报（这里没有日报路由，日报失败就沿用快照）
+  assert.equal(fetchImpl.calls.length, 5);
   assert.doesNotMatch(JSON.stringify(result.json), /service-token-secret/);
 });
 
@@ -499,4 +500,56 @@ test("a rejected passToken leaves the credential expired and asks for a rescan",
   assert.equal(result.json.result.isError, true);
   assert.match(result.json.result.content[0].text, /续期失败.*70016.*重新扫码/);
   assert.equal(JSON.parse(await kv.get(TOKEN_KEY)).auth_state, "expired");
+});
+
+test("health_latest prefers newer daily reports when the snapshot lags behind", async () => {
+  let dailyCalls = 0;
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/relatives/get_relative_list": {
+      code: 0,
+      result: { relative_list: [{ relative_uid: 42 }] },
+    },
+    "/app/v1/relatives/get_latest_data": {
+      code: 0,
+      result: {
+        data_list: [
+          { key: "sleep", time: 1_793_577_600, value: '{"total_duration":298}' },
+          { key: "heart_rate", time: 1_793_632_980, value: '{"bpm":126}' },
+        ],
+      },
+    },
+    "/app/v1/relatives/get_aggregated_data": () => {
+      // 参数是加密的，按调用顺序区分：sleep、heart_rate、steps
+      const key = ["sleep", "heart_rate", "steps"][dailyCalls++];
+      const data = {
+        sleep: [{ time: 1_794_182_400, value: '{"total_duration":113,"sleep_score":40}' }],
+        heart_rate: [
+          {
+            time: 1_794_182_400,
+            value: JSON.stringify({
+              avg_hr: 80,
+              latest_hr: { bpm: 77, time: 1_794_240_000, dbTime: 1_794_211_200 },
+            }),
+          },
+        ],
+        steps: [],
+      };
+      return { code: 0, result: { data_list: data[key] } };
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: 14,
+    method: "tools/call",
+    params: { name: "health_latest", arguments: {} },
+  });
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.equal(value.data.sleep.date, "2026-11-09");
+  assert.equal(value.data.sleep.total_duration, 113);
+  assert.equal(value.data.sleep.source, "daily_report");
+  assert.equal(value.data.heart_rate.bpm, 77);
+  assert.equal(value.data.heart_rate.time, 1_794_211_200);
+  assert.equal(value.data.heart_rate.date, "2026-11-09");
 });
