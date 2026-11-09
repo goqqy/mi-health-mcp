@@ -402,7 +402,12 @@ async function firstRelative(token, fetchImpl) {
 }
 
 function normalizeLatestItem(item) {
-  const time = Number(item?.time || 0);
+  let time = Number(item?.time || 0);
+  // 心率这种单点数据，小米是把北京时间当 UTC 存的，比真实时间多 8 小时
+  // （11-10 00:50 查到的"最新心率"时间在 7.7 小时之后）。按天的数据是当天 00:00，不受影响。
+  if (item?.key === "heart_rate" && time > Date.now() / 1000 + 600) {
+    time -= CST_OFFSET_SECONDS;
+  }
   const extra = { date: cstDate(time), is_stale: isStale(time) };
   const value = parseEmbeddedValue(item?.value);
   if (value && typeof value === "object" && !Array.isArray(value)) {
