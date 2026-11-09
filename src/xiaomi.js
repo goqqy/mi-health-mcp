@@ -260,15 +260,17 @@ export async function refreshToken(env, token, fetchImpl = fetch, now = Date.now
       `passToken 续期失败（code=${data.code ?? "unknown"}：${apiMessage(data)}），请重新扫码登录`,
     );
   }
+  // 跟上游一样直接拼在 location 后面：用 URL 对象改参数会把小米签过名的
+  // 其他参数重新编码一遍，签名就对不上了。quote() 默认不转义 "/"，这里也保留。
   const clientSign = encodeURIComponent(
     await sha1Base64(`nonce=${data.nonce ?? ""}&${data.ssecurity}`),
-  );
-  const location = assertXiaomiUrl(data.location);
-  location.searchParams.set("clientSign", decodeURIComponent(clientSign));
+  ).replace(/%2F/g, "/");
+  assertXiaomiUrl(data.location);
+  const location = `${data.location}&clientSign=${clientSign}`;
   const loginCookies = { ...cookies, ...extractCookies(response.headers) };
   let extracted;
   try {
-    extracted = await extractServiceToken(fetchImpl, location.toString(), loginCookies);
+    extracted = await extractServiceToken(fetchImpl, location, loginCookies);
   } catch (error) {
     throw new XiaomiAuthError(`passToken 续期失败：${error.message}，请重新扫码登录`);
   }
@@ -626,7 +628,9 @@ async function extractServiceToken(fetchImpl, location, cookies) {
     }
   }
   if (!serviceToken) {
-    throw new XiaomiApiError("扫码成功，但未能取得 serviceToken");
+    throw new XiaomiApiError(
+      `扫码成功，但未能取得 serviceToken（HTTP ${response.status}）`,
+    );
   }
   return { serviceToken, cookies: { ...cookies, ...responseCookies } };
 }
