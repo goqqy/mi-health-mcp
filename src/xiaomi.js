@@ -615,7 +615,9 @@ async function extractServiceToken(fetchImpl, location, cookies) {
       Cookie: cookieHeader(cookies),
     },
   });
-  await response.body?.cancel();
+  const preview = (await readTextLimited(response).catch(() => ""))
+    .slice(0, 120)
+    .replace(/[A-Za-z0-9+/=_%-]{20,}/g, "…");
   const responseCookies = extractCookies(response.headers);
   const redirectLocation = response.headers.get("location");
   const candidateUrls = [url.toString(), redirectLocation].filter(Boolean);
@@ -629,7 +631,8 @@ async function extractServiceToken(fetchImpl, location, cookies) {
   }
   if (!serviceToken) {
     throw new XiaomiApiError(
-      `扫码成功，但未能取得 serviceToken（HTTP ${response.status}）`,
+      `扫码成功，但未能取得 serviceToken（HTTP ${response.status}，${url.host}${url.pathname}，` +
+        `cookie: ${Object.keys(responseCookies).join(",") || "无"}，body: ${preview || "空"}）`,
     );
   }
   return { serviceToken, cookies: { ...cookies, ...responseCookies } };
