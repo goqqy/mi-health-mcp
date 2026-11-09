@@ -314,11 +314,18 @@ async function firstRelative(env, fetchImpl) {
 }
 
 function normalizeLatestItem(item) {
+  const time = Number(item?.time || 0);
+  const extra = { date: cstDate(time), is_stale: isStale(time) };
   const value = parseEmbeddedValue(item?.value);
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    return { time: Number(item?.time || 0), ...value };
+    return { time, ...extra, ...value };
   }
-  return { time: Number(item?.time || 0), value };
+  return { time, ...extra, value };
+}
+
+function isStale(time) {
+  if (!Number.isFinite(time) || time <= 0) return true;
+  return cstDate(time) !== cstDate(Math.floor(Date.now() / 1000));
 }
 
 export async function getLatestHealth(env, fetchImpl = fetch) {
