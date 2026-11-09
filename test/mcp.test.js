@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   computeSignedNonce,
   encryptData,
+  sha1Base64,
 } from "../src/crypto.js";
 import { createWorker } from "../src/index.js";
 import {
@@ -405,14 +406,16 @@ function serviceLoginMock(apiRoutes, { refreshOk = true } = {}) {
       return new Response(
         `&&&START&&&${JSON.stringify({
           ssecurity: SSECURITY,
-          nonce: "123",
+          nonce: "__NONCE__",
           cUserId: "c-user-secret",
           location: "https://sts-hlth.io.mi.com/healthapp/sts?sid=miothealth",
-        })}`,
+        }).replace('"__NONCE__"', "8174624316178453507")}`,
         { status: 200 },
       );
     }
     if (url.pathname === "/healthapp/sts" && url.searchParams.has("clientSign")) {
+      const expected = await sha1Base64(`nonce=8174624316178453507&${SSECURITY}`);
+      assert.equal(url.searchParams.get("clientSign"), expected);
       return new Response(null, {
         status: 302,
         headers: { "Set-Cookie": "serviceToken=refreshed-service-secret; Path=/" },

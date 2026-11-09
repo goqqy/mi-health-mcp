@@ -248,8 +248,10 @@ export async function refreshToken(env, token, fetchImpl = fetch, now = Date.now
     },
   });
   let data;
+  let rawText = "";
   try {
-    data = parseMiResponse(await readTextLimited(response));
+    rawText = await readTextLimited(response);
+    data = parseMiResponse(rawText);
   } catch {
     throw new XiaomiAuthError(
       `passToken 续期失败（HTTP ${response.status}），请重新扫码登录`,
@@ -262,8 +264,11 @@ export async function refreshToken(env, token, fetchImpl = fetch, now = Date.now
   }
   // 跟上游一样直接拼在 location 后面：用 URL 对象改参数会把小米签过名的
   // 其他参数重新编码一遍，签名就对不上了。quote() 默认不转义 "/"，这里也保留。
+  // nonce 是 19 位整数，JSON.parse 成 Number 会丢精度、签名就错了，从原文里原样取
+  const nonce =
+    rawText.match(/"nonce"\s*:\s*"?(-?\d+)/)?.[1] ?? String(data.nonce ?? "");
   const clientSign = encodeURIComponent(
-    await sha1Base64(`nonce=${data.nonce ?? ""}&${data.ssecurity}`),
+    await sha1Base64(`nonce=${nonce}&${data.ssecurity}`),
   ).replace(/%2F/g, "/");
   assertXiaomiUrl(data.location);
   const location = `${data.location}&clientSign=${clientSign}`;
