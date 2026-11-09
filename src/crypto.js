@@ -58,7 +58,7 @@ async function digestBytes(algorithm, data) {
   return new Uint8Array(await globalThis.crypto.subtle.digest(algorithm, data));
 }
 
-async function sha1Base64(message) {
+export async function sha1Base64(message) {
   return bytesToBase64(await digestBytes("SHA-1", encoder.encode(message)));
 }
 

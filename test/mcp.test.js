@@ -387,3 +387,113 @@ test("QR start and poll store refreshed credentials without returning them", asy
   );
   assert.equal(calls.some((url) => url.includes("/healthapp/sts")), true);
 });
+
+function serviceLoginMock(apiRoutes, { refreshOk = true } = {}) {
+  const api = encryptedApiMock(apiRoutes);
+  const calls = [];
+  const fetchImpl = async (input, options = {}) => {
+    const url = new URL(input);
+    calls.push(url);
+    if (url.pathname === "/pass/serviceLogin") {
+      if (!refreshOk) {
+        return new Response(
+          `&&&START&&&${JSON.stringify({ code: 70016, desc: "登录验证失败" })}`,
+          { status: 200 },
+        );
+      }
+      assert.match(options.headers.Cookie, /passToken=pass-token-secret/);
+      return new Response(
+        `&&&START&&&${JSON.stringify({
+          ssecurity: SSECURITY,
+          nonce: "123",
+          cUserId: "c-user-secret",
+          location: "https://sts-hlth.io.mi.com/healthapp/sts?sid=miothealth",
+        })}`,
+        { status: 200 },
+      );
+    }
+    if (url.pathname === "/healthapp/sts" && url.searchParams.has("clientSign")) {
+      return new Response(null, {
+        status: 302,
+        headers: { "Set-Cookie": "serviceToken=refreshed-service-secret; Path=/" },
+      });
+    }
+    if (url.pathname === "/healthapp/sts") return new Response("ok", { status: 200 });
+    return api(input, options);
+  };
+  fetchImpl.calls = calls;
+  return fetchImpl;
+}
+
+const relativeRoutes = (onLatest) => ({
+  "/app/v1/relatives/get_relative_list": (url, options) => {
+    if (!/serviceToken=refreshed-service-secret/.test(options.headers.Cookie)) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    return { code: 0, result: { relative_list: [{ relative_uid: 42 }] } };
+  },
+  "/app/v1/relatives/get_latest_data": () => {
+    onLatest?.();
+    return {
+      code: 0,
+      result: {
+        latest_data_time: 1,
+        data_list: [{ key: "heart_rate", time: 1700000000, value: '{"bpm":70}' }],
+      },
+    };
+  },
+});
+
+test("an expired serviceToken is renewed with passToken instead of asking for a rescan", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const worker = createWorker({ fetchImpl: serviceLoginMock(relativeRoutes()) });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: 11,
+    method: "tools/call",
+    params: { name: "health_latest", arguments: {} },
+  });
+
+  assert.notEqual(result.json.result.isError, true);
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.equal(value.data.heart_rate.bpm, 70);
+  assert.equal(value.data.heart_rate.date, "2023-11-15");
+  assert.equal(value.data.heart_rate.is_stale, true);
+  assert.match(value.message, /不是今天的数据：heart_rate 停在 2023-11-15/);
+  const stored = JSON.parse(await kv.get(TOKEN_KEY));
+  assert.equal(stored.service_token, "refreshed-service-secret");
+  assert.equal(stored.auth_state, "valid");
+  assert.ok(stored.refreshed_at);
+  assert.doesNotMatch(JSON.stringify(result.json), /refreshed-service-secret|pass-token-secret/);
+});
+
+test("a token already marked expired is renewed on the next query", async () => {
+  const kv = new MemoryKv({
+    [TOKEN_KEY]: JSON.stringify(tokenRecord({ auth_state: "expired" })),
+  });
+  const worker = createWorker({ fetchImpl: serviceLoginMock(relativeRoutes()) });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: 12,
+    method: "tools/call",
+    params: { name: "health_latest", arguments: {} },
+  });
+  assert.notEqual(result.json.result.isError, true);
+  assert.equal(JSON.parse(await kv.get(TOKEN_KEY)).auth_state, "valid");
+});
+
+test("a rejected passToken leaves the credential expired and asks for a rescan", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const worker = createWorker({
+    fetchImpl: serviceLoginMock(relativeRoutes(), { refreshOk: false }),
+  });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: 13,
+    method: "tools/call",
+    params: { name: "health_latest", arguments: {} },
+  });
+  assert.equal(result.json.result.isError, true);
+  assert.match(result.json.result.content[0].text, /续期失败.*70016.*重新扫码/);
+  assert.equal(JSON.parse(await kv.get(TOKEN_KEY)).auth_state, "expired");
+});

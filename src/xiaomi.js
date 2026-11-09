@@ -1,12 +1,15 @@
 import {
   buildEncryptedParams,
   decryptResponse,
+  sha1Base64,
 } from "./crypto.js";
 
 export const TOKEN_KEY = "mi_fitness_token";
 export const LOGIN_SESSION_KEY = "mi_fitness_login_session";
 
 const XIAOMI_QR_LOGIN_URL = "https://c3.account.xiaomi.com/longPolling/loginUrl";
+// 用扫码时拿到的 passToken 换新的 serviceToken；和扫码一样走 c3（国内）机房
+const XIAOMI_SERVICE_LOGIN_URL = "https://c3.account.xiaomi.com/pass/serviceLogin";
 const STS_HEALTH_URL = "https://sts-hlth.io.mi.com/healthapp/sts";
 const HEALTH_API_BASE = "https://hlth.io.mi.com";
 const SERVICE_SID = "miothealth";
@@ -211,17 +214,96 @@ export async function getAuthStatus(env) {
   };
 }
 
-async function requireActiveToken(env) {
+async function requireToken(env) {
   const token = await loadToken(env);
   if (!token?.service_token || !token?.ssecurity) {
     throw new XiaomiAuthError("尚未登录，请先调用 health_login_start", {
       authExpired: false,
     });
   }
-  if (token.auth_state === "expired") {
-    throw new XiaomiAuthError("凭证已过期，请重新扫码登录");
-  }
   return token;
+}
+
+// serviceToken 几天就会失效，passToken 能管很久：失效时用 passToken 走一次
+// serviceLogin 换新的（参考 mi-fitness-python 的 login_passtoken），不用再扫码。
+export async function refreshToken(env, token, fetchImpl = fetch, now = Date.now()) {
+  if (!token?.pass_token || !token?.user_id) {
+    throw new XiaomiAuthError("凭证已过期，且没有 passToken 可以续，请重新扫码登录");
+  }
+  const deviceId = token.device_id || randomDeviceId();
+  const cookies = {
+    passToken: token.pass_token,
+    userId: token.user_id,
+    deviceId,
+  };
+  const url = new URL(XIAOMI_SERVICE_LOGIN_URL);
+  url.searchParams.set("_json", "true");
+  url.searchParams.set("sid", SERVICE_SID);
+  const response = await fetchImpl(url, {
+    method: "GET",
+    redirect: "manual",
+    headers: {
+      "User-Agent": LOGIN_USER_AGENT,
+      Cookie: cookieHeader(cookies),
+    },
+  });
+  let data;
+  try {
+    data = parseMiResponse(await readTextLimited(response));
+  } catch {
+    throw new XiaomiAuthError(
+      `passToken 续期失败（HTTP ${response.status}），请重新扫码登录`,
+    );
+  }
+  if (!data.ssecurity || !data.location) {
+    throw new XiaomiAuthError(
+      `passToken 续期失败（code=${data.code ?? "unknown"}：${apiMessage(data)}），请重新扫码登录`,
+    );
+  }
+  const clientSign = encodeURIComponent(
+    await sha1Base64(`nonce=${data.nonce ?? ""}&${data.ssecurity}`),
+  );
+  const location = assertXiaomiUrl(data.location);
+  location.searchParams.set("clientSign", decodeURIComponent(clientSign));
+  const loginCookies = { ...cookies, ...extractCookies(response.headers) };
+  let extracted;
+  try {
+    extracted = await extractServiceToken(fetchImpl, location.toString(), loginCookies);
+  } catch (error) {
+    throw new XiaomiAuthError(`passToken 续期失败：${error.message}，请重新扫码登录`);
+  }
+  const refreshed = {
+    ...token,
+    c_user_id: data.cUserId || token.c_user_id || "",
+    service_token: extracted.serviceToken,
+    ssecurity: data.ssecurity,
+    pass_token: extracted.cookies.passToken || token.pass_token,
+    device_id: deviceId,
+    auth_state: "valid",
+    updated_at: new Date(now).toISOString(),
+    refreshed_at: new Date(now).toISOString(),
+    last_checked_at: null,
+    last_error: null,
+  };
+  await exchangeSts(fetchImpl, deviceId, extracted.cookies, now);
+  await saveToken(env, refreshed);
+  return refreshed;
+}
+
+// 先用现在的凭证查；标过期了，或者小米说鉴权失败，就用 passToken 续一次再查。
+async function withActiveToken(env, fetchImpl, operation) {
+  let token = await requireToken(env);
+  if (token.auth_state === "expired") {
+    token = await refreshToken(env, token, fetchImpl);
+    return operation(token);
+  }
+  try {
+    return await operation(token);
+  } catch (error) {
+    if (!error?.authExpired) throw error;
+    token = await refreshToken(env, token, fetchImpl);
+    return operation(token);
+  }
 }
 
 async function encryptedRequest(fetchImpl, token, method, path, params) {
@@ -291,8 +373,7 @@ function responseResult(response) {
     : {};
 }
 
-async function firstRelative(env, fetchImpl) {
-  const token = await requireActiveToken(env);
+async function firstRelative(token, fetchImpl) {
   const response = await encryptedRequest(
     fetchImpl,
     token,
@@ -310,7 +391,7 @@ async function firstRelative(env, fetchImpl) {
   if (!validUid) {
     throw new XiaomiApiError("亲友列表第一项缺少有效 UID");
   }
-  return { token, relativeUid };
+  return relativeUid;
 }
 
 function normalizeLatestItem(item) {
@@ -329,7 +410,11 @@ function isStale(time) {
 }
 
 export async function getLatestHealth(env, fetchImpl = fetch) {
-  const { token, relativeUid } = await firstRelative(env, fetchImpl);
+  return withActiveToken(env, fetchImpl, (token) => latestHealth(token, fetchImpl));
+}
+
+async function latestHealth(token, fetchImpl) {
+  const relativeUid = await firstRelative(token, fetchImpl);
   const response = await encryptedRequest(
     fetchImpl,
     token,
@@ -351,14 +436,20 @@ export async function getLatestHealth(env, fetchImpl = fetch) {
     }
   }
 
+  const stale = Object.entries(selected)
+    .filter(([, item]) => item.is_stale)
+    .map(([name, item]) => `${name} 停在 ${item.date ?? "未知日期"}`);
   return {
     relative_uid: relativeUid,
     latest_data_time: Number(result.latest_data_time || 0),
+    today: cstDate(Math.floor(Date.now() / 1000)),
     data: selected,
     message:
       Object.keys(selected).length === 0
         ? "暂无睡眠、心率或步数数据（设备可能未佩戴或尚未同步）"
-        : undefined,
+        : stale.length > 0
+          ? `不是今天的数据：${stale.join("，")}（手环可能没戴、没电，或手机还没同步上来）`
+          : undefined,
   };
 }
 
@@ -397,7 +488,13 @@ export async function getHealthSeries(
   fetchImpl = fetch,
   now = Date.now(),
 ) {
-  const { token, relativeUid } = await firstRelative(env, fetchImpl);
+  return withActiveToken(env, fetchImpl, (token) =>
+    healthSeries(token, metric, days, fetchImpl, now),
+  );
+}
+
+async function healthSeries(token, metric, days, fetchImpl, now) {
+  const relativeUid = await firstRelative(token, fetchImpl);
   const { start, end } = cstTodayWindow(now, days);
   const response = await encryptedRequest(
     fetchImpl,
