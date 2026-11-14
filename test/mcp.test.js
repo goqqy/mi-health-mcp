@@ -461,9 +461,9 @@ test("an expired serviceToken is renewed with passToken instead of asking for a 
   assert.notEqual(result.json.result.isError, true);
   const value = JSON.parse(result.json.result.content[0].text);
   assert.equal(value.data.heart_rate.bpm, 70);
-  assert.equal(value.data.heart_rate.date, "2023-11-15");
+  assert.equal(value.data.heart_rate.date, "2023-11-14");
   assert.equal(value.data.heart_rate.is_stale, true);
-  assert.match(value.message, /不是今天的数据：heart_rate 停在 2023-11-15/);
+  assert.match(value.message, /不是今天的数据：heart_rate 停在 2023-11-14/);
   const stored = JSON.parse(await kv.get(TOKEN_KEY));
   assert.equal(stored.service_token, "refreshed-service-secret");
   assert.equal(stored.auth_state, "valid");
@@ -552,4 +552,34 @@ test("health_latest prefers newer daily reports when the snapshot lags behind", 
   assert.equal(value.data.heart_rate.bpm, 77);
   assert.equal(value.data.heart_rate.time, 1_794_211_200);
   assert.equal(value.data.heart_rate.date, "2026-11-09");
+});
+
+test("snapshot heart-rate time is shifted back 8 hours even when it is old", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/relatives/get_relative_list": {
+      code: 0,
+      result: { relative_list: [{ relative_uid: 42 }] },
+    },
+    "/app/v1/relatives/get_latest_data": {
+      code: 0,
+      result: {
+        data_list: [
+          // 小米给的 11-12 02:20（北京时间被当成 UTC），真实是 11-11 18:20
+          { key: "heart_rate", time: 1_794_421_200, value: '{"bpm":107,"time":1794421200}' },
+        ],
+      },
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: 15,
+    method: "tools/call",
+    params: { name: "health_latest", arguments: {} },
+  });
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.equal(value.data.heart_rate.time, 1_794_392_400);
+  assert.equal(value.data.heart_rate.date, "2026-11-11");
+  assert.equal(value.data.heart_rate.bpm, 107);
 });
