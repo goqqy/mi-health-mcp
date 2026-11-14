@@ -341,8 +341,19 @@ async function encryptedRequest(fetchImpl, token, method, path, params) {
     options.body = new URLSearchParams(encrypted).toString();
   }
 
-  const response = await fetchImpl(url, options);
-  const body = await readTextLimited(response);
+  // 小米偶尔会把请求挂着不回（11-15 刚同步完时心率日报一直不回），
+  // 不加超时的话整个工具调用都会卡到客户端超时。
+  let response;
+  let body;
+  try {
+    response = await fetchImpl(url, { ...options, signal: AbortSignal.timeout(20_000) });
+    body = await readTextLimited(response);
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      throw new XiaomiApiError("小米接口 20 秒没有响应，稍后再试");
+    }
+    throw error;
+  }
   if (response.status === 401 || response.status === 403) {
     throw new XiaomiAuthError(`小米鉴权失败（HTTP ${response.status}）`);
   }
