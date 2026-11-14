@@ -566,7 +566,7 @@ test("snapshot heart-rate time is shifted back 8 hours even when it is old", asy
       result: {
         data_list: [
           // 小米给的 11-12 02:20（北京时间被当成 UTC），真实是 11-11 18:20
-          { key: "heart_rate", time: 1_794_421_200, value: '{"bpm":107,"time":1794421200}' },
+          { key: "heart_rate", time: 1_794_355_200, value: '{"bpm":107,"time":1794421200}' },
         ],
       },
     },

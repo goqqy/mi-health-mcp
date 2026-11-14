@@ -409,7 +409,9 @@ function normalizeLatestItem(item) {
   if (item?.key === "heart_rate") {
     // 心率这种单点数据，小米是把北京时间当 UTC 存的，一直比真实时间多 8 小时
     // （11-01、11-10、11-15 都核对过；dbTime 才是对的）。按天的数据是当天 00:00，不受影响。
-    time = Number(fields.dbTime || 0) || (time ? time - CST_OFFSET_SECONDS : 0);
+    // 外层 time 只是那天，value 里的 time 才是这次测量的时刻
+    const point = Number(fields.time || 0) || time;
+    time = Number(fields.dbTime || 0) || (point ? point - CST_OFFSET_SECONDS : 0);
   }
   // time / date 放最后，免得 value 里自带的 time 把改好的盖回去
   return { ...fields, time, date: cstDate(time), is_stale: isStale(time) };
