@@ -470,6 +470,9 @@ async function latestHealth(token, fetchImpl) {
     }
   }
 
+  // 睡眠的 date 是醒来那天：今天还没睡醒之前，最新的本来就是昨天那条，不算旧
+  const yesterday = cstDate(Math.floor(Date.now() / 1000) - 86400);
+  if (selected.sleep?.date === yesterday) selected.sleep.is_stale = false;
   const stale = Object.entries(selected)
     .filter(([, item]) => item.is_stale)
     .map(([name, item]) => `${name} 停在 ${item.date ?? "未知日期"}`);
